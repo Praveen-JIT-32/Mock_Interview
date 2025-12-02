@@ -3,6 +3,8 @@ import boto3
 import difflib
 import uuid
 import asyncio
+import requests
+from difflib import SequenceMatcher
 import re
 import contextlib
 from datetime import datetime
@@ -507,203 +509,312 @@ def detect_coding_language(skills: str) -> str:
     
     return "Python"
 
-# ================== QUESTION GENERATION (DYNAMIC AI-POWERED) ==================
+async def generate_non_coding_question(conversation: List[Dict],skills: str,question_number: int,mode: str) -> str:
+   
 
-async def generate_non_coding_question(
-    conversation: List[Dict],
-    skills: str,
-    question_number: int,
-    mode: str
-) -> str:
-    """Generate non-coding interview question dynamically based on mode"""
-    skills_text = skills or "technical skills"
-    
-    # Build conversation history context
-    previous_questions = []
-    if conversation:
-        previous_questions = [
-            msg["content"] for msg in conversation 
-            if msg.get("role") == "assistant"
-        ]
-    
-    history_context = ""
-    if previous_questions:
-        history_context = f"\nPreviously asked questions:\n" + "\n".join(f"- {q}" for q in previous_questions[-2:])
-    
-    # Question-specific prompts with dynamic mode interpretation
-    prompts = {
-        1: f"""You are an expert technical interviewer. Generate a professional opening question that:
-- Welcomes the candidate warmly
-- Asks about their experience with {skills_text}
-- Is appropriate for any difficulty level
-- Keep it to 2-3 lines
-- Start the interview with " Welcome to the interview!"
+    # -------------------------------------------------------
+    #  FIXED QUESTION 1
+    # -------------------------------------------------------
+    if question_number == 1:
+        return "Thank you for Joining, could please Tell me about yourself."
 
-Generate the question now:""",
-              
-        2: f"""You are an expert technical interviewer conducting a {mode}-level interview.
+    # -------------------------------------------------------
+    # BUILD MEMORY FROM CANDIDATE ANSWERS
+    # -------------------------------------------------------
+    candidate_answers = [
+        msg["content"] for msg in conversation if msg.get("role") == "user"
+    ]
 
-SKILL AREA: {skills_text}
-DIFFICULTY: {mode}
-QUESTION TYPE: Technical question requiring real-world experience explanation
+    full_memory_text = "\n".join(f"- {ans}" for ans in candidate_answers if ans.strip())
 
-Instructions:
-- For {mode} level, adjust the depth and complexity accordingly
-- If {mode} is "Basic", ask about fundamental concepts and simple usage
-- If {mode} is "Intermediate", ask about practical applications and common scenarios
-- If {mode} is "Advanced", ask about complex implementations, optimizations, or architectural decisions
-- Keep it to 2-3 lines maximum
-- Make it different from previous questions{history_context}
+    if not full_memory_text.strip():
+        full_memory_text = "- (No meaningful candidate answers yet)"
 
-Generate a {mode}-level technical question now:""",
+    # -------------------------------------------------------
+    # SPECIAL LOGIC FOR QUESTION 2 — USE Q1 ANSWER ONLY
+    # -------------------------------------------------------
+    if question_number == 2:
+        q1_answer = candidate_answers[0] if candidate_answers else ""
+        if not q1_answer.strip():
+            q1_answer = "I have technical skills relevant to the job."
 
-        3: f"""You are an expert technical interviewer conducting a {mode}-level interview.
+        q2_prompt = f"""
+You are a senior technical interviewer.
 
-SKILL AREA: {skills_text}
-DIFFICULTY: {mode}
-QUESTION TYPE: Scenario-based problem-solving question
+The candidate answered "Tell me about yourself" as:
+"{q1_answer}"
 
-Instructions:
-- For {mode} level, adjust scenario complexity accordingly
-- If {mode} is "Basic", present a simple, straightforward scenario
-- If {mode} is "Intermediate", present a realistic production scenario with moderate complexity
-- If {mode} is "Advanced", present a complex scenario requiring architectural thinking and trade-off analysis
-- Keep it to 2-3 lines maximum
-- Make it different from previous questions{history_context}
+Generate ONE technical question based directly on their answer:
+- Use skills, technologies, or concepts they mentioned.
+- Do NOT ask personal questions.
+- Polite, professional tone.
+- Difficulty level: {mode}
+- Do NOT require code.
+- Keep the question 1–2 sentences.
 
-Generate a {mode}-level scenario question now:"""
-    }
-    
-    prompt = prompts.get(question_number, prompts[3])
-    
+Question:
+"""
+        try:
+            return (await invoke_bedrock(q2_prompt, max_tokens=150, temperature=0.7)).strip()
+        except:
+            return "Based on your introduction, could you explain one technical concept you mentioned?"
+
+    # -------------------------------------------------------
+    # FOR QUESTIONS 3–5 → USE FULL MEMORY CONTEXT
+    # -------------------------------------------------------
+    previous_questions = [
+        msg["content"] for msg in conversation if msg.get("role") == "assistant"
+    ]
+    last_two = "\n".join(f"- {q}" for q in previous_questions[-2:]) if previous_questions else "None"
+
+    memory_prompt = f"""
+You are a professional technical interviewer.
+
+### CANDIDATE MEMORY (use this to generate the next question)
+{full_memory_text}
+
+### SKILLS
+{skills}
+
+### PREVIOUSLY ASKED QUESTIONS (avoid these topics & patterns)
+{last_two}
+
+### CORE RULES
+- Generate ONE unique, high-quality technical question.
+- The question must be based on BOTH:
+  1. The candidate’s previous answers (memory)
+  2. The required skills: {skills}
+- DO NOT repeat the same style or topic used before.
+- The tone must remain polite and professional.
+- The question must NOT require writing code.
+- The difficulty must match the interview level: **{mode}**
+- Keep the question short (1–2 sentences max).
+- The question must feel natural, not templated.
+- Vary question style: concepts, debugging, best practices, usage, decision-making, trade-offs, system behaviour, optimization, or real-world scenarios.
+
+### INTERVIEW GUIDELINES
+- Ask only technical questions strictly related to the candidate's skills and mode.
+- Use the candidate's past answers to create meaningful follow-up questions.
+- Do NOT ask about the candidate's projects, work experience, or personal background.
+- Do not summarise candidate answers.
+- Technical topics by difficulty:
+  • Basic → variables, loops, lists, simple logic  
+  • Medium → functions, OOP basics, trees, stacks, queues  
+  • Hard → OOP design, patterns, architecture, recursion, optimization  
+
+1. **Question Style**
+- For Q1, start with a greeting and basic concept (handled in logic).
+- Subsequent questions must remain technical only.
+
+2. **Answer Handling**
+- Only acknowledge responses politely: “Okay, let’s continue.”
+- Skip unrelated questions from the candidate without deviating.
+
+3. **Interview Flow**
+- Base follow-up questions on candidate memory.
+- Keep the interview purely technical.
+- Do not give solutions or hints.
+
+4. **Candidate Interaction**
+- No grammar evaluation.
+- Stay polite and keep the interview professional.
+- If candidate asks anything to interviewer, acknowledge and continue.
+
+5. **Tone & Safety**
+- Never mention AI.
+- Never provide URLs.
+- Maintain consistent politeness.
+
+6. **Repetition & Flow**
+- Do NOT repeat topics from previous questions.
+- Ensure every question is fresh, unique, and aligned with the candidate’s skills and memory.
+
+Now generate the next question:
+"""
+
+
     try:
-        question = await invoke_bedrock(prompt, max_tokens=250, temperature=0.7)
-        
-        # Check similarity with last question
-        if conversation:
-            last_question = next(
-                (m["content"] for m in reversed(conversation) if m.get("role") == "assistant"),
-                ""
-            )
-            if last_question:
-                similarity = difflib.SequenceMatcher(None, question, last_question).ratio()
-                if similarity >= 0.7:
-                    # Regenerate with explicit instruction to be different
-                    retry_prompt = prompt + f"\n\nIMPORTANT: Make this VERY different from: '{last_question}'"
-                    question = await invoke_bedrock(retry_prompt, max_tokens=250, temperature=0.8)
-        
+        question = await invoke_bedrock(memory_prompt, max_tokens=200, temperature=0.8)
+
+        # Duplicate prevention — check similarity
+        if previous_questions:
+            
+            similarity = SequenceMatcher(None, question, previous_questions[-1]).ratio()
+            if similarity > 0.70:
+                retry_prompt = memory_prompt + "\nRewrite with a completely different topic."
+                question = await invoke_bedrock(retry_prompt, max_tokens=220, temperature=1.0)
+
         return question.strip()
-    except Exception as e:
-        logger.error(f"Failed to generate question: {e}")
-        raise
+
+    except Exception:
+        return "Explain a technical concept related to your skills."
 
 
 
 # async def generate_coding_question(
 #     skills: str, 
 #     mode: str,
-#     question_number: int
+#     question_number: int,
+#     conversation: list = None
 # ) -> str:
-#     """Generate coding challenge with different focus based on question number"""
+#     """Generate coding challenge with strong duplicate prevention."""
+    
 #     coding_language = detect_coding_language(skills)
-    
-  
-#     # ✅ Add uniqueness seed
+
 #     import random
+#     from difflib import SequenceMatcher
 #     seed = random.randint(1000, 9999)
-    
-#     prompt = f"""You are an expert technical interviewer creating a {mode}-level coding challenge.
 
-# PROGRAMMING LANGUAGE: {skills}
-# DIFFICULTY LEVEL: {mode}
-# SKILL AREA: {skills}
-# UNIQUENESS SEED: {seed}
+#     # ---- Extract previous coding questions (robust detection) ----
+#     previous_coding = []
+#     if conversation:
+#         for msg in conversation:
+#             if msg.get("role") == "assistant":
+#                 txt = msg.get("content", "").lower()
+#                 if "coding question" in txt:
+#                     previous_coding.append(msg["content"])
 
-# Instructions:
-# - Create a {mode}-level problem that tests
-# - For "Basic": Simple problem with clear logic, no complex algorithms needed
-# - For "Intermediate": Moderate problem requiring standard
-# - For "Advanced": Complex problem requiring advanced techniques
-# - Generate the coding question for to run in sandbox IDE
+#     last_coding = previous_coding[-1] if previous_coding else ""
 
-# Problem Requirements:
-# 1. Clear, concise problem statement (3-5 lines)
-# 2. Input format specification
-# 3. Output format specification
-# 4. 1 sample test cases with expected output
-# 5. Should be solvable in 10-15 minutes for a {mode}-level candidate
+#     # ---- Build base prompt ----
+#     prompt = f"""You are an expert coding interviewer.
 
-# 6. DO NOT include solution, hints, or implementation details
-# 7. Make it creative and interesting, not a textbook problem
+# Create a {mode}-level coding problem for the candidate to implement in an online sandbox IDE.
 
-# Generate the {mode}-level {skills} coding problem:"""
-    
-#     try:
-#         question = await invoke_bedrock(prompt, max_tokens=400, temperature=0.9)
-#         return f"This is a {mode}-level coding question. You have 10 minutes to write your code.\n\n{question.strip()}"
-#     except Exception as e:
-#         logger.error(f"Failed to generate coding question: {e}")
-#         raise
+# Language: {coding_language}
+# Uniqueness Seed: {seed}
+
+# Rules:
+# - Must be fully executable locally (NO internet, cloud, APIs).
+# - Must NOT resemble any previous coding question.
+# - Keep problem statement short (3–5 lines).
+# - Include:
+#   1. Problem Statement
+#   2. Input Format
+#   3. Output Format
+#   4. EXACTLY one sample input and output
+# - Do NOT include solution or hints.
+# """
+
+#     # ---- Insert previous question to avoid ----
+#     if last_coding:
+#         prompt += f"""
+
+# IMPORTANT: Avoid repeating or resembling the previous coding question:
+
+# {last_coding}
+
+# Create a completely different scenario with new input/output patterns.
+# """
+
+#     # ---- First generation ----
+#     question = (await invoke_bedrock(prompt, max_tokens=400, temperature=1.0)).strip()
+
+#     # ---- Check similarity ----
+#     if last_coding:
+#         similarity = SequenceMatcher(None, question, last_coding).ratio()
+
+#         # If similar → regenerate
+#         if similarity >= 0.65:
+#             retry_prompt = prompt + f"""
+
+# The generated question is TOO SIMILAR (similarity={similarity:.2f}).
+
+# Rewrite the question COMPLETELY using:
+# - A new scenario
+# - Different logic
+# - Different constraints
+# - New sample input/output
+# """
+#             question = (await invoke_bedrock(retry_prompt, max_tokens=450, temperature=1.3)).strip()
+
+#     # ---- Final wrapper ----
+#     return f"This is a {mode}-level coding question. You have 10 minutes to write {coding_language} code.\n\n{question}"
 
 async def generate_coding_question(
     skills: str, 
     mode: str,
     question_number: int,
-    conversation: list = None
+    conversation: list = None,
+    previous_questions: list = None
 ) -> str:
-    """Generate coding challenge with uniqueness and duplicate prevention."""
+    
+    from difflib import SequenceMatcher
+    import random
     
     coding_language = detect_coding_language(skills)
-
-    import random
     seed = random.randint(1000, 9999)
-    
+
+    # Use explicitly passed previous coding questions
+    previous_coding = previous_questions or []
+    last_coding = previous_coding[-1] if previous_coding else ""
+
+    # Base prompt
     prompt = f"""You are an expert coding interviewer.
 
-Create a {mode}-level coding problem that the candidate will implement in an online sandbox IDE without external configuration.
+Create a {mode}-level coding problem for the candidate.
 
-Coding Topic Area: {skills}
-DIFFICULTY LEVEL: {mode}
-TOPIC CONTEXT: {skills}
-UNIQUENESS SEED: {seed}
+Language: {coding_language}
+Uniqueness Seed: {seed}
 
-Instructions:
-- The question MUST be fully executable locally with no external dependencies, no cloud connections, no internet access, and no credentials.
-- The code should not require AWS, external APIs, online services, or special SDK configuration.
-- For Basic: simple logic, no advanced algorithms
-- For Intermediate: real-world scenario with moderate complexity
-- For Advanced: algorithmic thinking or data structures
+Rules:
+- Must be fully executable locally (NO internet, cloud, or APIs).
+- Must be COMPLETELY DIFFERENT from previous coding questions.
+- Keep the problem statement short (3–5 lines).
+- MUST include:
+    1. Problem Statement
+    2. Input Format
+    3. Output Format
+    4. EXACTLY one sample input and output
+- Do NOT include solutions or hints.
+"""
 
-Problem Requirements:
-1. Clear, concise problem statement (3–5 lines)
-2. Input format
-3. Output format
-4. EXACTLY one sample input and expected output
-5. DO NOT include solution or hints
+    # Add previous question context
+    if last_coding:
+        prompt += f"""
 
-Generate the problem now:"""
-    
-    try:
-        question = (await invoke_bedrock(prompt, max_tokens=400, temperature=0.9)).strip()
+IMPORTANT:
+The previous coding question was:
 
-        # Duplicate prevention check
-        if conversation:
-            last_question = next(
-                (msg["content"] for msg in reversed(conversation) if msg.get("role") == "assistant"),
-                ""
-            )
-            from difflib import SequenceMatcher
-            similarity = SequenceMatcher(None, question, last_question).ratio()
+\"\"\"{last_coding}\"\"\"
 
-            if similarity >= 0.70:
-                retry_prompt = prompt + f"\n\nIMPORTANT: Make it completely different from:\n{last_question}"
-                question = (await invoke_bedrock(retry_prompt, max_tokens=450, temperature=1.1)).strip()
+You MUST generate a coding question that uses a TOTALLY DIFFERENT:
+- topic  
+- logic  
+- domain  
+- algorithm  
+- input/output pattern  
+"""
 
-        return f"This is a {mode}-level coding question. You have 10 minutes to write {skills} code.\n\n{question}"
+    # First generation
+    question = (await invoke_bedrock(prompt, max_tokens=400, temperature=1.0)).strip()
 
-    except Exception as e:
-        logger.error(f"Failed to generate coding question: {e}")
-        raise
+    # Similarity check only
+    if last_coding:
+        similarity = SequenceMatcher(None, question.lower(), last_coding.lower()).ratio()
+
+        # If similar, regenerate with stronger constraints
+        if similarity >= 0.50:
+            retry_prompt = prompt + f"""
+
+REJECTION:
+The generated question is too similar to the previous one.
+(similarity={similarity:.2f})
+
+MANDATORY:
+- Change the topic entirely.
+- Change the algorithm.
+- Change the data structure.
+- Change the input/output style.
+- Do NOT reuse ANY concept from the previous question.
+
+Generate a NEW and UNIQUE coding problem now:
+"""
+            question = (await invoke_bedrock(retry_prompt, max_tokens=450, temperature=1.3)).strip()
+
+    # Final output wrapper
+    return f"This is a {mode}-level coding question. You have 10 minutes to write {coding_language} code.\n\n{question}"
+
 
 
 # ================== EVALUATION ==================
@@ -946,24 +1057,82 @@ async def stream_audio_to_transcribe(input_stream, audio_queue: asyncio.Queue):
             pass
 
 # ================== CODE EXECUTION ==================
-async def run_code(code: str) -> str:
-    """Execute code in sandboxed environment"""
-    buffer = io.StringIO()
+async def run_code_in_sandbox(code: str, skills: str, inputs: list[str] = None) -> str:
+
+    if inputs is None:
+        inputs = []
+
+
+    
+    coding_language = detect_coding_language(skills).lower()
+
     try:
-        wrapped_code = "def __candidate_func__():\n"
-        for line in code.splitlines():
-            wrapped_code += f"    {line}\n"
-        wrapped_code += "\n__candidate_func__()"
-        
-        with contextlib.redirect_stdout(buffer):
-            exec(wrapped_code, {"__builtins__": __builtins__}, {})
-        
-        output = buffer.getvalue().strip()
-        return output or "Code executed successfully (no output)."
+        input_text = "\n".join(inputs)
+
+        # Interpreter names for Piston
+        lang_map = {
+            "python": "python",
+            "cpp": "cpp",
+            "java": "java",
+            "javascript": "javascript",
+            "js": "javascript",
+            "c": "c",
+            "ruby": "ruby",
+            "go": "go",
+            "rust": "rust"
+        }
+
+        # Correct file extensions
+        ext_map = {
+            "python": "py",
+            "cpp": "cpp",
+            "java": "java",
+            "javascript": "js",
+            "js": "js",
+            "c": "c",
+            "ruby": "rb",
+            "go": "go",
+            "rust": "rs"
+        }
+
+        if coding_language not in lang_map:
+            return f"Unsupported language: {coding_language}"
+
+        file_ext = ext_map[coding_language]
+
+        payload = {
+            "language": lang_map[coding_language],
+            "version": "*",
+            "files": [
+                {
+                    "name": f"main.{file_ext}",
+                    "content": code
+                }
+            ],
+            "stdin": input_text
+        }
+
+        # Send request to Piston API
+        res = requests.post(
+            "https://emkc.org/api/v2/piston/execute",
+            json=payload,
+            timeout=10
+        )
+
+        if res.status_code != 200:
+            return f"Error: API responded with status {res.status_code}"
+
+        result = res.json()
+
+        output = result.get("run", {}).get("output", "").strip()
+
+        return output or "No output returned."
+
+    except requests.Timeout:
+        return "Error: Code execution timed out (Piston)."
+
     except Exception as e:
-        return f"Error: {e}"
-    finally:
-        buffer.close()
+        return f"Error: {str(e)}"
 
 class TranscriptionHandler(TranscriptResultStreamHandler):
 
@@ -1295,47 +1464,126 @@ async def stop_transcription(state: InterviewState):
 
 
 
+# async def send_next_question(state: InterviewState):
+#     """Generate and send next interview question"""
+#     if state.question_count > Config.MAX_QUESTIONS:
+#         await end_interview(state)
+#         return
+    
+#     # Generate question
+#     if state.question_count in Config.CODING_QUESTION_NUMBERS:
+#         # ✅ Pass question_number to generate different coding questions
+#         question = await generate_coding_question(
+#             state.skills, 
+#             state.mode,
+#             state.question_count  # ADD THIS
+#         )
+#     else:
+#         question = await generate_non_coding_question(
+#             state.conversation,
+#             state.skills,
+#             state.question_count,
+#             state.mode
+#         )
+    
+#     if not question.strip():
+#         raise RuntimeError("Failed to generate question")
+    
+#     if state.transcript_handler:
+#         state.transcript_handler.set_question_number(state.question_count)
+    
+#     state.conversation.append({"role": "assistant", "content": question})
+    
+#     state.current_interaction_id = await save_interaction(
+#         state.email,
+#         question,
+#         candidate_text="",
+#         question_number=state.question_count,
+#         session_id=state.session_id,
+#         skill=state.skills,
+#         mode=state.mode
+#     )
+    
+#     await send_agent_message(state, question)
+
 async def send_next_question(state: InterviewState):
-    """Generate and send next interview question"""
+    """Generate and send next interview question with proper duplicate prevention"""
+    
+    # Check if interview should end
     if state.question_count > Config.MAX_QUESTIONS:
         await end_interview(state)
         return
     
-    # Generate question
-    if state.question_count in Config.CODING_QUESTION_NUMBERS:
-        # ✅ Pass question_number to generate different coding questions
-        question = await generate_coding_question(
-            state.skills, 
-            state.mode,
-            state.question_count  # ADD THIS
+    try:
+        # ✅ CRITICAL FIX: Collect previous coding questions BEFORE generating new one
+        previous_coding_questions = []
+        if state.question_count in Config.CODING_QUESTION_NUMBERS:
+            # Extract all previous coding questions from conversation
+            for msg in state.conversation:
+                if msg.get("role") == "assistant":
+                    content = msg.get("content", "")
+                    # Check if it's a coding question
+                    if "coding question" in content.lower() or "write" in content.lower() and "code" in content.lower():
+                        previous_coding_questions.append(content)
+            
+            logger.info(f"Found {len(previous_coding_questions)} previous coding questions for Q{state.question_count}")
+        
+        # Generate question based on type
+        if state.question_count in Config.CODING_QUESTION_NUMBERS:
+            question = await generate_coding_question(
+                skills=state.skills,
+                mode=state.mode,
+                question_number=state.question_count,
+                conversation=state.conversation,
+                previous_questions=previous_coding_questions  # ✅ Pass explicitly
+            )
+        else:
+            question = await generate_non_coding_question(
+                conversation=state.conversation,
+                skills=state.skills,
+                question_number=state.question_count,
+                mode=state.mode
+            )
+        
+        # Validate question was generated
+        if not question or not question.strip():
+            logger.error(f"Empty question generated for Q{state.question_count}")
+            raise RuntimeError("Failed to generate question")
+        
+        logger.info(f"Generated Q{state.question_count}: {question[:100]}...")
+        
+        # Reset transcript handler for new question
+        if state.transcript_handler:
+            state.transcript_handler.set_question_number(state.question_count)
+        
+        # ✅ Add to conversation AFTER generation (maintains clean history)
+        state.conversation.append({"role": "assistant", "content": question})
+        
+        # Save interaction to database
+        state.current_interaction_id = await save_interaction(
+            candidate_email=state.email,
+            agent_text=question,
+            candidate_text="",  # Will be filled when candidate responds
+            question_number=state.question_count,
+            session_id=state.session_id,
+            skill=state.skills,
+            mode=state.mode
         )
-    else:
-        question = await generate_non_coding_question(
-            state.conversation,
-            state.skills,
-            state.question_count,
-            state.mode
-        )
-    
-    if not question.strip():
-        raise RuntimeError("Failed to generate question")
-    
-    if state.transcript_handler:
-        state.transcript_handler.set_question_number(state.question_count)
-    
-    state.conversation.append({"role": "assistant", "content": question})
-    
-    state.current_interaction_id = await save_interaction(
-        state.email,
-        question,
-        candidate_text="",
-        question_number=state.question_count,
-        session_id=state.session_id,
-        skill=state.skills,
-        mode=state.mode
-    )
-    
-    await send_agent_message(state, question)
+        
+        logger.info(f"Saved interaction {state.current_interaction_id} for Q{state.question_count}")
+        
+        # Send question to candidate
+        await send_agent_message(state, question)
+        
+    except Exception as e:
+        logger.error(f"Failed to send question {state.question_count}: {e}")
+        # Send error to client
+        await safe_send(state, {
+            "type": "error",
+            "message": "Failed to generate question. Please try again."
+        })
+        # Optionally end interview or retry
+        raise
 
 
 async def wait_for_code_submission(state):
@@ -1390,8 +1638,8 @@ async def process_question_loop(state: InterviewState):
     while state.question_count <= Config.MAX_QUESTIONS:
         # Collect response
         answer_text, answered = await collect_candidate_response(state)
-        
-        # Save response
+
+        # Save & store candidate answer BEFORE generating next question
         if answered and state.current_interaction_id:
             await update_candidate_response(state.current_interaction_id, answer_text)
             await safe_send(state, {"type": "candidate_final", "text": answer_text})
@@ -1401,12 +1649,14 @@ async def process_question_loop(state: InterviewState):
                 await update_candidate_response(state.current_interaction_id, "[no response]")
             state.conversation.append({"role": "user", "content": "[no response]"})
             await safe_send(state, {"type": "candidate_final", "text": "[no response]"})
-        
-        # Move to next question
+
+        # Now increment
         state.question_count += 1
+
+        # And THEN generate next question
         if state.question_count <= Config.MAX_QUESTIONS:
             await send_next_question(state)
-    
+
     await end_interview(state)
 
 async def evaluate_interview(state: InterviewState) -> Dict:
@@ -1473,7 +1723,8 @@ async def evaluate_interview(state: InterviewState) -> Dict:
         communication_strength=feedback["communication_strength"],
         technical_strength=feedback["technical_strength"],
         mode=state.mode,
-        violation_count=violation_count
+        violation_count=violation_count,
+        timestamp=datetime.utcnow().isoformat() 
     )
     
     # Clear tracker after saving
@@ -1524,10 +1775,7 @@ async def start_interview(state: InterviewState):
         )
     )
     
-    state.conversation.append({
-        "role": "user",
-        "content": f"Interview started with skills: {state.skills}, mode: {state.mode}"
-    })
+    
     
     await send_next_question(state)
     state.auto_task = asyncio.create_task(process_question_loop(state))
@@ -1625,8 +1873,13 @@ async def interview_websocket(
                 # Code execution
                 elif data.get("type") == "run_code":
                     code = data.get("code", "")
-                    result = await run_code(code)
+                    inputs = data.get("inputs", [])            # optional input support
+                    skills = state.skills                      # use candidate skills from interview session
+
+                    result = await run_code_in_sandbox(code=code,inputs=inputs,skills=skills)
+
                     await ws.send_json({"type": "run_result", "output": result})
+
                 
                 # Code submission
                 elif data.get("type") == "submit_code":
@@ -1665,7 +1918,6 @@ async def get_session_violations_endpoint(session_id: str):
         "penalty_applied": penalty,
         "penalty_per_violation": 1.0
     }
-
 
 
 # ================== MAIN ==================
